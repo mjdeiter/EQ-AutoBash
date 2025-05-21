@@ -47,7 +47,7 @@ The script responds dynamically to lost aggro, low health, and NPC spellcasting,
 ## Installation
 
 1. **Download the script:**  
-   Save [`AutoAggroBash.lua`](./AutoAggroBash.lua) to your MacroQuest `lua` folder.
+   Save [`AutoBash.lua`](./AutoBash.lua) to your MacroQuest `lua` folder.
 
 2. **Edit settings (optional):**  
    Open the script and adjust the configuration section at the top for your item names, HP threshold, etc.
@@ -60,7 +60,7 @@ The script responds dynamically to lost aggro, low health, and NPC spellcasting,
 
 4. **Run the script:**  
    ```
-   /lua run AutoAggroBash
+   /lua run AutoBash
    ```
 
 ---
@@ -90,7 +90,7 @@ local LOW_HP_THRESHOLD = 50    -- % HP to trigger emergency mode
 
 ## Version History
 
-See the top of [`AutoAggroBash.lua`](./AutoAggroBash.lua) for a full changelog.
+See the top of [`AutoBash.lua`](./AutoBash.lua) for a full changelog.
 
 ---
 
