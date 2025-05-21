@@ -1,21 +1,20 @@
--- AutoBash.lua
+local mq = require 'mq'
 
-local SCRIPT_VERSION = "2.0"
+local SCRIPT_VERSION = "1.6"
 local SCRIPT_DATE = "2025-05-21"
 
 --[[
 Changelog:
-v2.0 (2025-05-21)
-  - Command system: /autobash help, status, on, off, verbose, bossadd, bossdel, addzone, delzone, reload
-  - /autobash help prints all features/commands on load and on request
-  - Boss and zone awareness: always shield for named mobs or in dangerous zones
-  - Aggro/multi-mob awareness: shield if many mobs have aggro
-  - Stun/low HP/rapid spike/feign/root/mez/medding triggers
-  - Buff/debuff triggers (example stub)
-  - Group awareness: shield if tank or healer dead
-  - Logging of swaps/reasons
-  - Verbosity toggling
-  - All prior logic improvements retained
+v1.6 (2025-05-21)
+  - Adds advanced danger triggers:
+    - Threat Level/Number of Aggroed Mobs: Shield if aggro count above threshold.
+    - Class-Specific Logic: Defensive disc logic for knights/warriors; shield while disc is up.
+    - Mana/Energy Triggers: Shield if mana or endurance below threshold.
+    - Root/Mez/Charm Handling: Shield if rooted, mezzed, or charmed.
+    - Buff/Debuff Triggers: Shield if specific buff/debuff detected.
+  - Retains periodic shield swap for focus effect.
+  - Core safety triggers (stun, low HP) remain.
+  - No custom slash commands.
 ]]
 
 ----------------------------- CONFIG SECTION -----------------------------
@@ -28,18 +27,22 @@ local SHIELD_DURATION = 5  -- Seconds to leave shield equipped for focus benefit
 
 local LOW_HP_THRESHOLD = 15    -- Equip shield below this HP%
 local SAFE_HP_THRESHOLD = 25   -- Only unequip shield when above this HP%
-local DANGER_COOLDOWN = 2      -- Minimum seconds between danger-triggered swaps
 
 local AGGRO_MOB_COUNT = 3      -- Equip shield if aggro > this number
 
-local VERBOSE_ECHO = true      -- Set to false for minimal chat spam
-local LOGGING = true           -- Log swaps/reasons to file
+local LOW_MANA_THRESHOLD = 10      -- Shield if mana < this %
+local LOW_ENDURANCE_THRESHOLD = 10 -- Shield if endurance < this %
 
-local BOSS_LIST = { "Lord Nagafen", "Veeshan" } -- Boss/named list (case-sensitive)
-local DANGEROUS_ZONES = { "Veeshan's Peak", "Plane of Fear" } -- Always shield in these
+local DEFENSIVE_DISC_NAMES = {
+    -- Add more as needed
+    ["Final Stand Discipline"] = true,
+    ["Deflection Discipline"] = true,
+    ["Mantle of the Preserver"] = true,
+    ["Shield Flash"] = true,
+}
 
-local BUFF_TRIGGER = ""        -- e.g. "Mortal Coil" (example stub)
-local DEBUFF_TRIGGER = ""      -- e.g. "Doom" (example stub)
+local BUFF_TRIGGER = "Mortal Coil"        -- Sample: shield if this buff is up
+local DEBUFF_TRIGGER = "Doom"             -- Sample: shield if this debuff is up
 
 ----------------------------- STATE SECTION -----------------------------
 local lastSwapTime = 0
@@ -47,186 +50,24 @@ local shieldEquippedForFocus = false
 local combatActive = false
 local inDanger = false -- Track persistent danger state
 local lastDangerEcho = 0
-local autobash_enabled = true
-local lastSpikeHP = mq.TLO.Me.PctHPs() or 100
-local lastLogTime = 0
-
-local mq = require 'mq'
 
 ----------------------------- UTILS -----------------------------
-local function filelog(msg)
-    if LOGGING then
-        local f = io.open(mq.configDir .. "/AutoBash.log", "a")
-        if f then
-            f:write(os.date("%Y-%m-%d %H:%M:%S") .. " " .. msg .. "\n")
-            f:close()
-        end
-    end
-end
-
 local function echo(msg, ...)
-    if VERBOSE_ECHO then
-        mq.cmdf('/echo [AutoBash v%s] ' .. msg, SCRIPT_VERSION, ...)
-    end
+    mq.cmdf('/echo [AutoBash v%s] ' .. msg, SCRIPT_VERSION, ...)
 end
 
 local function critical_echo(msg, ...)
     mq.cmdf('/echo \ar[AutoBash v%s] ' .. msg .. '\ax', SCRIPT_VERSION, ...)
 end
 
------------------------------ FEATURE HELP -----------------------------
-local function printHelp()
-    local help = [[
-\agAutoBash v%s - Features and Commands:
-\ayFeatures:\ax
-- Auto swaps shield/offhand for Furious Bash focus effect for DPS and defense
-- Always equips shield if stunned, low HP, rapid spike, rooted, mezzed, or medding
-- Boss/named mob awareness (no swap to offhand for BOSS_LIST mobs)
-- Zone awareness (always shield in DANGEROUS_ZONES)
-- Aggro awareness: always shield if aggroed by >= %d mobs
-- Buff/debuff triggers (stub: %s/%s)
-- Group tank/healer death awareness (shield for survival)
-- Logging to file if enabled
-- Anti-spam logic (no rapid reswaps during danger)
-- Configurable echo verbosity and logging
-- Command interface for in-game control
-
-\ayCommands:\ax
-  /autobash help      - Show this help
-  /autobash status    - Show current state and config
-  /autobash on        - Enable script
-  /autobash off       - Disable script
-  /autobash verbose   - Toggle echo verbosity
-  /autobash bossadd <name> - Add a boss to always-shield list
-  /autobash bossdel <name> - Remove a boss from always-shield list
-  /autobash addzone <name> - Add a zone to danger zone list
-  /autobash delzone <name> - Remove a zone from danger zone list
-  /autobash reload    - Reload config lists (future)
-]]
-    mq.cmdf(help, SCRIPT_VERSION, AGGRO_MOB_COUNT, BUFF_TRIGGER, DEBUFF_TRIGGER)
-end
-
------------------------------ COMMANDS -----------------------------
-mq.event("AutoBashCmd",
-    "#1#/autobash#2#",
-    function(line, _, rest)
-        local arg = (rest or ""):gsub("^%s+", "")
-        if arg:find("help") then
-            printHelp()
-        elseif arg:find("status") then
-            local state = autobash_enabled and "\agENABLED\ax" or "\arDISABLED\ax"
-            mq.cmdf("[AutoBash] State: %s | Verbose: %s | Focus swap: %s | Shield: %s | DPS: %s",
-                state, tostring(VERBOSE_ECHO), tostring(shieldEquippedForFocus), SHIELD_ITEM, OFFHAND_ITEM)
-        elseif arg:find("on") then
-            autobash_enabled = true
-            echo("AutoBash enabled.")
-        elseif arg:find("off") then
-            autobash_enabled = false
-            echo("AutoBash disabled.")
-        elseif arg:find("verbose") then
-            VERBOSE_ECHO = not VERBOSE_ECHO
-            echo("Verbose echo now: %s", tostring(VERBOSE_ECHO))
-        elseif arg:find("^bossadd%s+(.+)") then
-            local name = arg:match("^bossadd%s+(.+)")
-            table.insert(BOSS_LIST, name)
-            echo("Added '%s' to boss list.", name)
-        elseif arg:find("^bossdel%s+(.+)") then
-            local name = arg:match("^bossdel%s+(.+)")
-            for i, v in ipairs(BOSS_LIST) do
-                if v == name then table.remove(BOSS_LIST, i) break end
-            end
-            echo("Removed '%s' from boss list.", name)
-        elseif arg:find("^addzone%s+(.+)") then
-            local name = arg:match("^addzone%s+(.+)")
-            table.insert(DANGEROUS_ZONES, name)
-            echo("Added '%s' to dangerous zones.", name)
-        elseif arg:find("^delzone%s+(.+)") then
-            local name = arg:match("^delzone%s+(.+)")
-            for i, v in ipairs(DANGEROUS_ZONES) do
-                if v == name then table.remove(DANGEROUS_ZONES, i) break end
-            end
-            echo("Removed '%s' from dangerous zones.", name)
-        elseif arg:find("reload") then
-            echo("Reload not implemented (edit script and /reload).")
-        else
-            echo("Unknown command. Use /autobash help.")
-        end
-    end
-)
-
------------------------------ TRIGGERS -----------------------------
+----------------------------- LOGIC -----------------------------
 local function isBusy()
-    return mq.TLO.Me.Zoning() or mq.TLO.Me.Loading() or mq.TLO.Me.Feigning()
-end
-
-local function isBossFight()
-    local target = mq.TLO.Target
-    for _, boss in ipairs(BOSS_LIST) do
-        if target() and target.Name() == boss then return true end
-    end
-    return false
-end
-
-local function inDangerZone()
-    local zone = mq.TLO.Zone.ShortName() or ""
-    for _, z in ipairs(DANGEROUS_ZONES) do
-        if zone == z then return true end
-    end
-    return false
-end
-
-local function aggroCount()
-    -- Uses XTarget slots if available, fallback to 1 if not supported
-    local count = 0
-    for i=1, mq.TLO.Me.XTargetSlots() or 0 do
-        if mq.TLO.Me.XTarget(i).TargetType() == "Auto Hater" then count = count + 1 end
-    end
-    return math.max(count, (mq.TLO.Me.PctAggro() and mq.TLO.Me.PctAggro() > 100 and 2 or 1))
-end
-
-local function groupTankOrHealerDead()
-    for i = 1, mq.TLO.Group() do
-        local member = mq.TLO.Group.Member(i)
-        if member() then
-            local class = member.Class.ShortName()
-            if ((class == "WAR" or class == "PAL" or class == "SHD") or (class == "CLR" or class == "DRU" or class == "SHM")) and member.Dead() then
-                return true
-            end
-        end
-    end
-    return false
-end
-
-local function hasBuff(name)
-    return name ~= "" and mq.TLO.Me.Buff(name)()
-end
-
-local function hasDebuff(name)
-    return name ~= "" and mq.TLO.Me.Debuff(name)()
-end
-
-local function isRootedMezzed()
-    return mq.TLO.Me.Rooted() or mq.TLO.Me.Mezzed()
-end
-
-local function isMedding()
-    return mq.TLO.Me.Sitting()
-end
-
-local function isRapidSpike()
-    local hp = mq.TLO.Me.PctHPs()
-    local prev = lastSpikeHP
-    lastSpikeHP = hp
-    return (prev - hp) >= 25
+    return mq.TLO.Me.Zoning() or mq.TLO.Me.Feigning() or not mq.TLO.Zone()
 end
 
 local function isValidCombatTarget()
     local target = mq.TLO.Target
-    return target()
-        and target.Type() == "NPC"
-        and target.Aggressive()
-        and not target.Dead()
-        and mq.TLO.Me.Combat()
+    return target() and target.Type() == "NPC" and target.Aggressive() and not target.Dead() and mq.TLO.Me.Combat()
 end
 
 local function equipItem(slot, itemName)
@@ -248,32 +89,113 @@ local function getCurrentOffhand()
     return ""
 end
 
------------------- DANGER LOGIC (returns true/false/reason) ------------------
+----------------------------- DANGER TRIGGERS -----------------------------
+local function aggroCount()
+    local count = 0
+    for i=1, (mq.TLO.Me.XTargetSlots() or 0) do
+        if mq.TLO.Me.XTarget(i).TargetType() == "Auto Hater" then count = count + 1 end
+    end
+    return count
+end
+
+local function hasActiveDisc()
+    for i=1, mq.TLO.Me.NumDiscTimers() or 0 do
+        local disc = mq.TLO.Me.CombatAbility(i).Name()
+        if disc and DEFENSIVE_DISC_NAMES[disc] and mq.TLO.Me.CombatAbilityReady(disc)() == false then
+            return true
+        end
+    end
+    return false
+end
+
+local function isKnightOrWarrior()
+    local class = mq.TLO.Me.Class.ShortName()
+    return class == "WAR" or class == "PAL" or class == "SHD"
+end
+
+local function manaLow()
+    return mq.TLO.Me.PctMana() and mq.TLO.Me.PctMana() < LOW_MANA_THRESHOLD
+end
+
+local function enduranceLow()
+    return mq.TLO.Me.PctEndurance() and mq.TLO.Me.PctEndurance() < LOW_ENDURANCE_THRESHOLD
+end
+
+local function isRootedMezzedCharmed()
+    return mq.TLO.Me.Rooted() or mq.TLO.Me.Mezzed() or mq.TLO.Me.Charmed()
+end
+
+local function hasBuff(name)
+    return name ~= "" and mq.TLO.Me.Buff(name)()
+end
+
+local function hasDebuff(name)
+    return name ~= "" and mq.TLO.Me.Debuff(name)()
+end
+
 local function dangerCheck()
     local hp = mq.TLO.Me.PctHPs()
     local stunned = mq.TLO.Me.Stunned()
+    local aggro = aggroCount()
+    local class = mq.TLO.Me.Class.ShortName()
 
-    if not autobash_enabled then return false, "disabled" end
-    if isBossFight() then return true, "boss" end
-    if inDangerZone() then return true, "dangerzone" end
-    if aggroCount() >= AGGRO_MOB_COUNT then return true, "aggro" end
-    if stunned then return true, "stunned" end
-    if hp < LOW_HP_THRESHOLD then return true, "lowhp" end
-    if isRootedMezzed() then return true, "cc" end
-    if isMedding() then return true, "medding" end
-    if isRapidSpike() then return true, "spike" end
-    if hasBuff(BUFF_TRIGGER) then return true, "buff" end
-    if hasDebuff(DEBUFF_TRIGGER) then return true, "debuff" end
-    if groupTankOrHealerDead() then return true, "group" end
-    return false, nil
+    if not inDanger and (hp < LOW_HP_THRESHOLD or stunned) then
+        inDanger = true
+        return true, "entered (stun/low HP)"
+    end
+
+    if aggro >= AGGRO_MOB_COUNT then
+        inDanger = true
+        return true, "aggro"
+    end
+
+    if isKnightOrWarrior() and hasActiveDisc() then
+        inDanger = true
+        return true, "defensive disc"
+    end
+
+    if manaLow() or enduranceLow() then
+        inDanger = true
+        return true, "mana/endurance low"
+    end
+
+    if isRootedMezzedCharmed() then
+        inDanger = true
+        return true, "cc/root/mez/charm"
+    end
+
+    if hasBuff(BUFF_TRIGGER) then
+        inDanger = true
+        return true, "special buff"
+    end
+
+    if hasDebuff(DEBUFF_TRIGGER) then
+        inDanger = true
+        return true, "special debuff"
+    end
+
+    -- Remain in danger state if below safe HP or still stunned
+    if inDanger and (hp < SAFE_HP_THRESHOLD or stunned) then
+        return true, "still"
+    end
+
+    -- Leave danger state if above safe HP and not stunned/triggered
+    if inDanger and (hp >= SAFE_HP_THRESHOLD and not stunned and aggro < AGGRO_MOB_COUNT
+        and not (isKnightOrWarrior() and hasActiveDisc())
+        and not manaLow() and not enduranceLow()
+        and not isRootedMezzedCharmed()
+        and not hasBuff(BUFF_TRIGGER)
+        and not hasDebuff(DEBUFF_TRIGGER)) then
+        inDanger = false
+        return false, "recovered"
+    end
+    return inDanger, "none"
 end
 
 ----------------------------- MAIN -----------------------------
 mq.cmd('/echo \agOriginally created by Alektra <Lederhosen>\ax')
-echo("Script loaded (version %s, %s). Type \ay/autobash help\ax for all features and commands.", SCRIPT_VERSION, SCRIPT_DATE)
-printHelp()
+echo("Script loaded (version %s, %s).", SCRIPT_VERSION, SCRIPT_DATE)
 
--- Item presence warnings
 if not mq.TLO.FindItem(SHIELD_ITEM)() then
     critical_echo("WARNING: Could not find your shield item: %s", SHIELD_ITEM)
 end
@@ -290,35 +212,36 @@ while true do
     local validCombat = isValidCombatTarget()
     local danger, dangerReason = dangerCheck()
 
-    -- Danger state: equip shield, echo/log swap
+    -- Priority 1: Danger state (all triggers)
     if danger then
-        if currentOffhand ~= SHIELD_ITEM and (now - lastDangerEcho > DANGER_COOLDOWN) then
+        if currentOffhand ~= SHIELD_ITEM then
             if equipItem(PROC_SLOT, SHIELD_ITEM) then
                 shieldEquippedForFocus = false
-                lastDangerEcho = now
-                local msg = ""
-                if dangerReason == "disabled" then msg = "AutoBash is disabled."
-                elseif dangerReason == "boss" then msg = "Boss/named target! Equipping shield for max defense."
-                elseif dangerReason == "dangerzone" then msg = "Dangerous zone! Equipping shield for safety."
-                elseif dangerReason == "aggro" then msg = "High aggro count! Equipping shield."
-                elseif dangerReason == "stunned" then msg = "Stunned! Equipping shield for safety."
-                elseif dangerReason == "lowhp" then msg = "Low HP (below %d%%)! Equipping shield for safety.", LOW_HP_THRESHOLD
-                elseif dangerReason == "cc" then msg = "Rooted or mezzed! Equipping shield."
-                elseif dangerReason == "medding" then msg = "Sitting/medding! Equipping shield."
-                elseif dangerReason == "spike" then msg = "Rapid HP drop! Equipping shield."
-                elseif dangerReason == "buff" then msg = "Dangerous buff detected! Equipping shield."
-                elseif dangerReason == "debuff" then msg = "Dangerous debuff detected! Equipping shield."
-                elseif dangerReason == "group" then msg = "Group tank/healer dead! Equipping shield."
-                else msg = "Danger! Equipping shield for safety." end
-                echo(msg)
-                filelog("Shield equipped due to: "..tostring(dangerReason))
+                if dangerReason ~= "still" then
+                    echo("DANGER: %s. Equipping shield for safety.", dangerReason)
+                    lastDangerEcho = now
+                end
             end
         end
         goto continue
+    elseif not danger and dangerReason == "recovered" then
+        -- Just left danger: restore normal offhand
+        if validCombat and currentOffhand ~= OFFHAND_ITEM then
+            if equipItem(PROC_SLOT, OFFHAND_ITEM) then
+                shieldEquippedForFocus = false
+                lastSwapTime = now
+                echo("Recovered from danger. Swapping back to DPS offhand for combat.")
+            end
+        elseif not validCombat and currentOffhand ~= OFFHAND_ITEM then
+            if equipItem(PROC_SLOT, OFFHAND_ITEM) then
+                shieldEquippedForFocus = false
+                echo("Recovered from danger. Out of combat, equipping DPS offhand.")
+            end
+        end
     end
 
-    -- Combat focus swap logic (only if not in danger and enabled)
-    if autobash_enabled and validCombat then
+    -- Priority 2: Valid combat swapping logic
+    if validCombat then
         if not combatActive then
             combatActive = true
             shieldEquippedForFocus = false
@@ -326,37 +249,36 @@ while true do
             if currentOffhand ~= OFFHAND_ITEM then
                 if equipItem(PROC_SLOT, OFFHAND_ITEM) then
                     echo("Engaged valid combat. Equipping DPS offhand to start swap cycle.")
-                    filelog("Combat start: DPS offhand equipped.")
                 end
             end
         end
+
+        -- Periodically swap shield in for focus effect, then back to DPS
         if not shieldEquippedForFocus and (now - lastSwapTime >= SHIELD_INTERVAL) then
             if equipItem(PROC_SLOT, SHIELD_ITEM) then
                 shieldEquippedForFocus = true
                 lastSwapTime = now
                 echo("Equipping shield to benefit from Furious Bash focus effect.")
-                filelog("Shield equipped for Furious Bash focus effect.")
             end
         elseif shieldEquippedForFocus and (now - lastSwapTime >= SHIELD_DURATION) then
             if equipItem(PROC_SLOT, OFFHAND_ITEM) then
                 shieldEquippedForFocus = false
                 lastSwapTime = now
                 echo("Swapping back to DPS offhand for continued combat.")
-                filelog("DPS offhand equipped after focus swap.")
             end
         end
     else
+        -- Not in valid combat
         if combatActive then
             combatActive = false
             shieldEquippedForFocus = false
-            if currentOffhand ~= OFFHAND_ITEM then
+            if not danger and currentOffhand ~= OFFHAND_ITEM then
                 if equipItem(PROC_SLOT, OFFHAND_ITEM) then
                     echo("Combat ended. Swapping back to DPS offhand.")
-                    filelog("Combat end: DPS offhand equipped.")
                 end
             end
         end
-        if currentOffhand ~= OFFHAND_ITEM then
+        if not danger and currentOffhand ~= OFFHAND_ITEM then
             equipItem(PROC_SLOT, OFFHAND_ITEM)
         end
     end
