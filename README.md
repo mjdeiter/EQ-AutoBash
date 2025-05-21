@@ -1,8 +1,8 @@
-# AutoAggroBash.lua
+# AutoBash.lua
 
 ## Overview
 
-**AutoAggroBash.lua** is a highly configurable lua script for EverQuest (Project Lazarus/E3N or similar emulated servers) warriors.  
+**AutoBash.lua** is a highly configurable lua script for EverQuest (Project Lazarus/E3N or similar emulated servers) warriors.  
 It automatically swaps your secondary slot between a shield and an offhand weapon to maximize aggro and survivability.  
 The script responds dynamically to lost aggro, low health, and NPC spellcasting, automatically using **Bash** at every opportunity for hate or interruption.
 
