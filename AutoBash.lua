@@ -1,20 +1,16 @@
 local mq = require 'mq'
 
-local SCRIPT_VERSION = "1.6"
-local SCRIPT_DATE = "2025-05-21"
+local SCRIPT_VERSION = "2.0"
+local SCRIPT_DATE = "2025-05-22"
 
 --[[
 Changelog:
-v1.6 (2025-05-21)
-  - Adds advanced danger triggers:
-    - Threat Level/Number of Aggroed Mobs: Shield if aggro count above threshold.
-    - Class-Specific Logic: Defensive disc logic for knights/warriors; shield while disc is up.
-    - Mana/Energy Triggers: Shield if mana or endurance below threshold.
-    - Root/Mez/Charm Handling: Shield if rooted, mezzed, or charmed.
-    - Buff/Debuff Triggers: Shield if specific buff/debuff detected.
-  - Retains periodic shield swap for focus effect.
-  - Core safety triggers (stun, low HP) remain.
-  - No custom slash commands.
+v2.0 (2025-05-22)
+  - Aggro only counts if in combat, so shield won't stick out of combat.
+  - Mana checks are skipped for warriors.
+  - Every time the shield is equipped (or the reason changes), the script echoes the reason(s).
+  - Shield only "sticks" for HP/stun recovery, not for temporary triggers.
+  - Out of combat at full HP, with no danger: always equips DPS offhand.
 ]]
 
 ----------------------------- CONFIG SECTION -----------------------------
@@ -34,7 +30,6 @@ local LOW_MANA_THRESHOLD = 10      -- Shield if mana < this %
 local LOW_ENDURANCE_THRESHOLD = 10 -- Shield if endurance < this %
 
 local DEFENSIVE_DISC_NAMES = {
-    -- Add more as needed
     ["Final Stand Discipline"] = true,
     ["Deflection Discipline"] = true,
     ["Mantle of the Preserver"] = true,
@@ -49,7 +44,6 @@ local lastSwapTime = 0
 local shieldEquippedForFocus = false
 local combatActive = false
 local inDanger = false -- Track persistent danger state
-local lastDangerEcho = 0
 
 ----------------------------- UTILS -----------------------------
 local function echo(msg, ...)
@@ -92,17 +86,22 @@ end
 ----------------------------- DANGER TRIGGERS -----------------------------
 local function aggroCount()
     local count = 0
+    if not mq.TLO.Me.Combat() then return 0 end
     for i=1, (mq.TLO.Me.XTargetSlots() or 0) do
-        if mq.TLO.Me.XTarget(i).TargetType() == "Auto Hater" then count = count + 1 end
+        local xtarget = mq.TLO.Me.XTarget(i)
+        if xtarget() and xtarget.TargetType() == "Auto Hater" then count = count + 1 end
     end
     return count
 end
 
 local function hasActiveDisc()
-    for i=1, mq.TLO.Me.NumDiscTimers() or 0 do
-        local disc = mq.TLO.Me.CombatAbility(i).Name()
-        if disc and DEFENSIVE_DISC_NAMES[disc] and mq.TLO.Me.CombatAbilityReady(disc)() == false then
-            return true
+    for i = 1, 20 do -- 20 disc slots should be enough for all classes
+        local disc = mq.TLO.Me.CombatAbility(i)
+        if disc() then
+            local discName = disc.Name()
+            if discName and DEFENSIVE_DISC_NAMES[discName] and not mq.TLO.Me.CombatAbilityReady(discName)() then
+                return true
+            end
         end
     end
     return false
@@ -114,6 +113,8 @@ local function isKnightOrWarrior()
 end
 
 local function manaLow()
+    local class = mq.TLO.Me.Class.ShortName()
+    if class == "WAR" then return false end
     return mq.TLO.Me.PctMana() and mq.TLO.Me.PctMana() < LOW_MANA_THRESHOLD
 end
 
@@ -130,66 +131,50 @@ local function hasBuff(name)
 end
 
 local function hasDebuff(name)
-    return name ~= "" and mq.TLO.Me.Debuff(name)()
+    return name ~= "" and mq.TLO.Me.Buff(name)()
 end
 
-local function dangerCheck()
-    local hp = mq.TLO.Me.PctHPs()
+-- Improved danger logic: only stick for HP/stun, all other danger clears instantly
+local function getDangerStatus()
+    local hp = mq.TLO.Me.PctHPs() or 100
     local stunned = mq.TLO.Me.Stunned()
     local aggro = aggroCount()
-    local class = mq.TLO.Me.Class.ShortName()
+    local reasons = {}
 
-    if not inDanger and (hp < LOW_HP_THRESHOLD or stunned) then
-        inDanger = true
-        return true, "entered (stun/low HP)"
+    -- Danger triggers
+    local hpDanger, stunDanger = false, false
+
+    if hp < LOW_HP_THRESHOLD then
+        hpDanger = true
+        table.insert(reasons, string.format("Low HP (%.1f%%)", hp))
+    end
+    if stunned then
+        stunDanger = true
+        table.insert(reasons, "Stunned")
+    end
+    if aggro >= AGGRO_MOB_COUNT then table.insert(reasons, "Aggro Count High") end
+    if isKnightOrWarrior() and hasActiveDisc() then table.insert(reasons, "Defensive Disc Active") end
+    if manaLow() then table.insert(reasons, "Low Mana") end
+    if enduranceLow() then table.insert(reasons, "Low Endurance") end
+    if isRootedMezzedCharmed() then table.insert(reasons, "Root/Mez/Charm") end
+    if hasBuff(BUFF_TRIGGER) then table.insert(reasons, "Special Buff") end
+    if hasDebuff(DEBUFF_TRIGGER) then table.insert(reasons, "Special Debuff") end
+
+    -- Only "stick" in danger after HP/stun, never for other triggers
+    if #reasons == 0 and inDanger then
+        if inDanger == "hp" and hp < SAFE_HP_THRESHOLD then
+            table.insert(reasons, string.format("Recovering HP (%.1f%%)", hp))
+        elseif inDanger == "stun" and stunned then
+            table.insert(reasons, "Recovering from Stun")
+        end
     end
 
-    if aggro >= AGGRO_MOB_COUNT then
-        inDanger = true
-        return true, "aggro"
+    if #reasons > 0 then
+        if hpDanger then return true, table.concat(reasons, " & "), "hp" end
+        if stunDanger then return true, table.concat(reasons, " & "), "stun" end
+        return true, table.concat(reasons, " & "), "other"
     end
-
-    if isKnightOrWarrior() and hasActiveDisc() then
-        inDanger = true
-        return true, "defensive disc"
-    end
-
-    if manaLow() or enduranceLow() then
-        inDanger = true
-        return true, "mana/endurance low"
-    end
-
-    if isRootedMezzedCharmed() then
-        inDanger = true
-        return true, "cc/root/mez/charm"
-    end
-
-    if hasBuff(BUFF_TRIGGER) then
-        inDanger = true
-        return true, "special buff"
-    end
-
-    if hasDebuff(DEBUFF_TRIGGER) then
-        inDanger = true
-        return true, "special debuff"
-    end
-
-    -- Remain in danger state if below safe HP or still stunned
-    if inDanger and (hp < SAFE_HP_THRESHOLD or stunned) then
-        return true, "still"
-    end
-
-    -- Leave danger state if above safe HP and not stunned/triggered
-    if inDanger and (hp >= SAFE_HP_THRESHOLD and not stunned and aggro < AGGRO_MOB_COUNT
-        and not (isKnightOrWarrior() and hasActiveDisc())
-        and not manaLow() and not enduranceLow()
-        and not isRootedMezzedCharmed()
-        and not hasBuff(BUFF_TRIGGER)
-        and not hasDebuff(DEBUFF_TRIGGER)) then
-        inDanger = false
-        return false, "recovered"
-    end
-    return inDanger, "none"
+    return false, "Safe", false
 end
 
 ----------------------------- MAIN -----------------------------
@@ -203,6 +188,8 @@ if not mq.TLO.FindItem(OFFHAND_ITEM)() then
     critical_echo("WARNING: Could not find your offhand item: %s", OFFHAND_ITEM)
 end
 
+local lastShieldReason = ""
+
 while true do
     mq.delay(250)
     if isBusy() then goto continue end
@@ -210,21 +197,26 @@ while true do
     local now = os.time()
     local currentOffhand = getCurrentOffhand()
     local validCombat = isValidCombatTarget()
-    local danger, dangerReason = dangerCheck()
+    local danger, dangerReason, dangerType = getDangerStatus()
 
-    -- Priority 1: Danger state (all triggers)
+    -- Handle danger state transitions and shield equip
     if danger then
         if currentOffhand ~= SHIELD_ITEM then
             if equipItem(PROC_SLOT, SHIELD_ITEM) then
                 shieldEquippedForFocus = false
-                if dangerReason ~= "still" then
-                    echo("DANGER: %s. Equipping shield for safety.", dangerReason)
-                    lastDangerEcho = now
-                end
+                echo("DANGER: %s. Equipping shield for safety.", dangerReason)
+                lastShieldReason = dangerReason
             end
+        elseif lastShieldReason ~= dangerReason then
+            -- Always echo if the reason changes, even if shield is already on
+            echo("DANGER: %s. Shield remains equipped.", dangerReason)
+            lastShieldReason = dangerReason
         end
+        inDanger = dangerType
         goto continue
-    elseif not danger and dangerReason == "recovered" then
+    elseif not danger and inDanger then
+        inDanger = false
+        lastShieldReason = ""
         -- Just left danger: restore normal offhand
         if validCombat and currentOffhand ~= OFFHAND_ITEM then
             if equipItem(PROC_SLOT, OFFHAND_ITEM) then
@@ -239,6 +231,9 @@ while true do
             end
         end
     end
+
+    -- If in danger, do nothing else; stay with shield
+    if inDanger then goto continue end
 
     -- Priority 2: Valid combat swapping logic
     if validCombat then
