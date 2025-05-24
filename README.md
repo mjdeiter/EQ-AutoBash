@@ -29,7 +29,7 @@ The script responds dynamically to lost aggro, low health, and NPC spellcasting,
 - **Configurable:**  
   Easily set item names, HP threshold, intervals, and more at the top of the script.
 
--Aggro Mode Selection
+- **Aggro Mode Selection:**
 AutoShield.lua now supports three configurable aggro-detection logics. Set your preferred mode at the top of the script:
 
 AGGRO_MODE = "primary"
