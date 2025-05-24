@@ -1,8 +1,8 @@
-# AutoBash.lua
+# AutoShield.lua
 
 ## Overview
 
-**AutoBash.lua** is a highly configurable lua script for EverQuest (Project Lazarus/E3N or similar emulated servers) warriors.  
+**AutoShield.lua** is a highly configurable lua script for EverQuest (Project Lazarus/E3N or similar emulated servers) warriors.  
 It automatically swaps your secondary slot between a shield and an offhand weapon to maximize aggro and survivability.  
 The script responds dynamically to lost aggro, low health, and NPC spellcasting, automatically using **Bash** at every opportunity for hate or interruption.
 
@@ -47,7 +47,7 @@ The script responds dynamically to lost aggro, low health, and NPC spellcasting,
 ## Installation
 
 1. **Download the script:**  
-   Save [`AutoBash.lua`](./AutoBash.lua) to your MacroQuest `lua` folder.
+   Save [`AutoShield.lua`](./AutoShield.lua) to your MacroQuest `lua` folder.
 
 2. **Edit settings (optional):**  
    Open the script and adjust the configuration section at the top for your item names, HP threshold, etc.
@@ -60,7 +60,7 @@ The script responds dynamically to lost aggro, low health, and NPC spellcasting,
 
 4. **Run the script:**  
    ```
-   /lua run AutoBash
+   /lua run AutoShield
    ```
 
 ---
@@ -90,7 +90,7 @@ local LOW_HP_THRESHOLD = 50    -- % HP to trigger emergency mode
 
 ## Version History
 
-See the top of [`AutoBash.lua`](./AutoBash.lua) for a full changelog.
+See the top of [`AutoShield.lua`](./AutoShield.lua) for a full changelog.
 
 ---
 
