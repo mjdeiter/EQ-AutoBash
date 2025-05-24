@@ -32,6 +32,9 @@ The script responds dynamically to lost aggro, low health, and NPC spellcasting,
 - **Version Tracking:**  
   Built-in version and changelog.
 
+ - **Heartbeat/Status Echo (Optional):**
+  Optionally prints periodic status messages in your EQ chat window, confirming that the script is active and monitoring. Disabled by default; can be enabled by setting ENABLE_STATUS_HEARTBEAT = true in the configuration.
+
 ---
 
 ## Requirements
@@ -75,6 +78,7 @@ local MAINHAND_ITEM = "Mace of Grim Tidings"
 local OFFHAND_ITEM = "Hammer of Rancorous Thoughts"
 local AGGRO_CHECK_INTERVAL = 1 -- seconds
 local LOW_HP_THRESHOLD = 50    -- % HP to trigger emergency mode
+local ENABLE_STATUS_HEARTBEAT = false -- Set to true to enable periodic status messages
 ```
 - Change the item names and threshold to match your gear and preferences.
 
