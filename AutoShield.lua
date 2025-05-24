@@ -1,14 +1,14 @@
 local mq = require 'mq'
 
-local SCRIPT_VERSION = "2.1"
+local SCRIPT_VERSION = "2.2"
 local SCRIPT_DATE = "2025-05-24"
 
 --[[
 Changelog:
-v2.1 (2025-05-24)
-  - Aggro count only includes "Auto Hater" mobs that are Aggressive and not Dead.
-  - Prevents nil value errors and false positives from passive xtargets.
-  - Advanced debug mode included.
+v2.2 (2025-05-24)
+  - User can now select aggro mode: "primary", "all", or "anyaggro".
+  - See config section for AGGRO_MODE.
+  - All prior debug and safety features preserved.
 ]]
 
 ----------------------------- CONFIG SECTION -----------------------------
@@ -16,13 +16,18 @@ local SHIELD_ITEM = "Shield of the Lightning Lord"
 local OFFHAND_ITEM = "Hammer of Rancorous Thoughts"
 local PROC_SLOT = 14 -- 13 = mainhand, 14 = offhand
 
+local AGGRO_MODE = "all"    -- "primary", "all", or "anyaggro"
+-- "primary": Shield if YOU are primary target of >= AGGRO_MOB_COUNT mobs.
+-- "all": Shield if >= AGGRO_MOB_COUNT "Auto Hater" mobs on xtarget, any target.
+-- "anyaggro": Shield if YOU have aggro on at least 1 mob (ignores count).
+
+local AGGRO_MOB_COUNT = 3   -- Number of mobs for threshold
+
 local SHIELD_INTERVAL = 25 -- Seconds between shield swap attempts (while safe)
 local SHIELD_DURATION = 5  -- Seconds to leave shield equipped for focus benefit
 
 local LOW_HP_THRESHOLD = 15    -- Equip shield below this HP%
 local SAFE_HP_THRESHOLD = 25   -- Only unequip shield when above this HP%
-
-local AGGRO_MOB_COUNT = 3      -- Equip shield if aggro >= this number
 
 local LOW_MANA_THRESHOLD = 10      -- Shield if mana < this %
 local LOW_ENDURANCE_THRESHOLD = 10 -- Shield if endurance < this %
@@ -34,23 +39,22 @@ local DEFENSIVE_DISC_NAMES = {
     ["Shield Flash"] = true,
 }
 
-local BUFF_TRIGGER = "Mortal Coil"        -- Sample: shield if this buff is up
-local DEBUFF_TRIGGER = "Doom"             -- Sample: shield if this debuff is up
+local BUFF_TRIGGER = "Mortal Coil"
+local DEBUFF_TRIGGER = "Doom"
 
-local ENABLE_STATUS_HEARTBEAT = false -- Set to true to enable periodic status messages
+local ENABLE_STATUS_HEARTBEAT = false
 
--- ADVANCED DEBUG CONFIG
 local ADVANCED_DEBUG = true
-local DEBUG_INTERVAL = 30 -- seconds between debug status messages
+local DEBUG_INTERVAL = 30
 
 ----------------------------- STATE SECTION -----------------------------
 local lastSwapTime = 0
 local shieldEquippedForFocus = false
 local combatActive = false
-local inDanger = false -- Track persistent danger state
+local inDanger = false
 local lastDebugTime = 0
 local lastHeartbeatTime = 0
-local HEARTBEAT_INTERVAL = 15 -- seconds between status messages
+local HEARTBEAT_INTERVAL = 15
 
 ----------------------------- UTILS -----------------------------
 local function echo(msg, ...)
@@ -96,9 +100,31 @@ local function getCurrentOffhand()
     return ""
 end
 
------------------------------ DANGER TRIGGERS -----------------------------
--- Only count "Auto Hater" mobs that are Aggressive and not Dead (robust, no nil errors)
-local function aggroCount()
+----------------------------- AGGRO LOGIC CHOICES -----------------------------
+
+local function aggroCount_primary()
+    -- Only count mobs where YOU are the primary target
+    local count = 0
+    if not mq.TLO.Me.Combat() then return 0 end
+    for i=1, (mq.TLO.Me.XTargetSlots() or 0) do
+        local xtarget = mq.TLO.Me.XTarget(i)
+        if xtarget() and xtarget.TargetType() == "Auto Hater" then
+            local id = xtarget.ID()
+            if id then
+                local spawn = mq.TLO.Spawn("id "..id)
+                if spawn() and spawn.Aggressive() and not spawn.Dead() then
+                    if spawn.TargetOfTarget.ID() == mq.TLO.Me.ID() then
+                        count = count + 1
+                    end
+                end
+            end
+        end
+    end
+    return count
+end
+
+local function aggroCount_all()
+    -- Count all active Auto Hater mobs, regardless of who they're targeting
     local count = 0
     if not mq.TLO.Me.Combat() then return 0 end
     for i=1, (mq.TLO.Me.XTargetSlots() or 0) do
@@ -116,8 +142,43 @@ local function aggroCount()
     return count
 end
 
+local function aggroCount_anyaggro()
+    -- Shield if YOU have aggro on at least 1 mob
+    local count = 0
+    if not mq.TLO.Me.Combat() then return 0 end
+    for i=1, (mq.TLO.Me.XTargetSlots() or 0) do
+        local xtarget = mq.TLO.Me.XTarget(i)
+        if xtarget() and xtarget.TargetType() == "Auto Hater" then
+            local id = xtarget.ID()
+            if id then
+                local spawn = mq.TLO.Spawn("id "..id)
+                if spawn() and spawn.Aggressive() and not spawn.Dead() then
+                    if spawn.TargetOfTarget.ID() == mq.TLO.Me.ID() then
+                        return 1 -- Early exit, just need one!
+                    end
+                end
+            end
+        end
+    end
+    return 0
+end
+
+local function aggroCount()
+    if AGGRO_MODE == "primary" then
+        return aggroCount_primary()
+    elseif AGGRO_MODE == "all" then
+        return aggroCount_all()
+    elseif AGGRO_MODE == "anyaggro" then
+        return aggroCount_anyaggro()
+    else
+        echo("WARNING: Invalid AGGRO_MODE '%s', defaulting to 'all'", AGGRO_MODE)
+        return aggroCount_all()
+    end
+end
+
+----------------------------- DANGER/UTILITY -----------------------------
 local function hasActiveDisc()
-    for i = 1, 20 do -- 20 disc slots should be enough for all classes
+    for i = 1, 20 do
         local disc = mq.TLO.Me.CombatAbility(i)
         if disc() then
             local discName = disc.Name()
@@ -174,7 +235,9 @@ local function getDangerStatus()
         stunDanger = true
         table.insert(reasons, "Stunned")
     end
-    if aggro >= AGGRO_MOB_COUNT then table.insert(reasons, string.format("Aggro Count High (%d)", aggro)) end
+    if (AGGRO_MODE == "anyaggro" and aggro >= 1) or (AGGRO_MODE ~= "anyaggro" and aggro >= AGGRO_MOB_COUNT) then
+        table.insert(reasons, string.format("Aggro Count High (%d)", aggro))
+    end
     if isKnightOrWarrior() and hasActiveDisc() then table.insert(reasons, "Defensive Disc Active") end
     if manaLow() then table.insert(reasons, "Low Mana") end
     if enduranceLow() then table.insert(reasons, "Low Endurance") end
@@ -182,7 +245,6 @@ local function getDangerStatus()
     if hasBuff(BUFF_TRIGGER) then table.insert(reasons, "Special Buff") end
     if hasDebuff(DEBUFF_TRIGGER) then table.insert(reasons, "Special Debuff") end
 
-    -- Only "stick" in danger after HP/stun, never for other triggers
     if #reasons == 0 and inDanger then
         if inDanger == "hp" and hp < SAFE_HP_THRESHOLD then
             table.insert(reasons, string.format("Recovering HP (%.1f%%)", hp))
@@ -201,7 +263,7 @@ end
 
 ----------------------------- MAIN -----------------------------
 mq.cmd('/echo \agOriginally created by Alektra <Lederhosen>\ax')
-echo("Script loaded (version %s, %s).", SCRIPT_VERSION, SCRIPT_DATE)
+echo("Script loaded (version %s, %s). AGGRO_MODE: %s", SCRIPT_VERSION, SCRIPT_DATE, AGGRO_MODE)
 
 if not mq.TLO.FindItem(SHIELD_ITEM)() then
     critical_echo("WARNING: Could not find your shield item: %s", SHIELD_ITEM)
@@ -252,7 +314,6 @@ while true do
     elseif not danger and inDanger then
         inDanger = false
         lastShieldReason = ""
-        -- Just left danger: restore normal offhand
         if validCombat and currentOffhand ~= OFFHAND_ITEM then
             if equipItem(PROC_SLOT, OFFHAND_ITEM) then
                 shieldEquippedForFocus = false
@@ -271,10 +332,8 @@ while true do
         end
     end
 
-    -- If in danger, do nothing else; stay with shield
     if inDanger then goto continue end
 
-    -- Priority 2: Valid combat swapping logic
     if validCombat then
         if not combatActive then
             combatActive = true
@@ -289,7 +348,6 @@ while true do
             end
         end
 
-        -- Periodically swap shield in for focus effect, then back to DPS
         if not shieldEquippedForFocus and (now - lastSwapTime >= SHIELD_INTERVAL) then
             if equipItem(PROC_SLOT, SHIELD_ITEM) then
                 shieldEquippedForFocus = true
@@ -308,7 +366,6 @@ while true do
             end
         end
     else
-        -- Not in valid combat
         if combatActive then
             combatActive = false
             shieldEquippedForFocus = false
@@ -325,7 +382,6 @@ while true do
         end
     end
 
-    -- Status Heartbeat (Idle/Not in Combat)
     if ENABLE_STATUS_HEARTBEAT then
         if not validCombat and not danger then
             if now - lastHeartbeatTime >= HEARTBEAT_INTERVAL then
@@ -335,7 +391,6 @@ while true do
         end
     end
 
-    -- ADVANCED DEBUG: Periodic status (throttled)
     if ADVANCED_DEBUG and now - lastDebugTime > DEBUG_INTERVAL then
         debug_echo("STATUS: Combat=%s | Aggro=%d | Offhand=%s | Danger=%s | HP=%.1f | XTargets=%d",
             tostring(validCombat), aggro, currentOffhand, tostring(inDanger), hp, xtargetSlots)
