@@ -44,7 +44,7 @@ local DEBUFF_TRIGGER = "Doom"
 
 local ENABLE_STATUS_HEARTBEAT = false
 
-local ADVANCED_DEBUG = true
+local ADVANCED_DEBUG = false
 local DEBUG_INTERVAL = 30
 
 ----------------------------- STATE SECTION -----------------------------
