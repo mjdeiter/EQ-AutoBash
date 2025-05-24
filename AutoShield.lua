@@ -39,11 +39,18 @@ local DEFENSIVE_DISC_NAMES = {
 local BUFF_TRIGGER = "Mortal Coil"        -- Sample: shield if this buff is up
 local DEBUFF_TRIGGER = "Doom"             -- Sample: shield if this debuff is up
 
+-- NEW: Toggle for status/heartbeat messages (off by default)
+local ENABLE_STATUS_HEARTBEAT = false -- Set to true to enable periodic status messages
+
 ----------------------------- STATE SECTION -----------------------------
 local lastSwapTime = 0
 local shieldEquippedForFocus = false
 local combatActive = false
 local inDanger = false -- Track persistent danger state
+
+-- NEW: Heartbeat status timer
+local lastHeartbeatTime = 0
+local HEARTBEAT_INTERVAL = 15 -- seconds between status messages
 
 ----------------------------- UTILS -----------------------------
 local function echo(msg, ...)
@@ -275,6 +282,16 @@ while true do
         end
         if not danger and currentOffhand ~= OFFHAND_ITEM then
             equipItem(PROC_SLOT, OFFHAND_ITEM)
+        end
+    end
+
+    -- Status Heartbeat (Idle/Not in Combat) -- NEW FEATURE
+    if ENABLE_STATUS_HEARTBEAT then
+        if not validCombat and not danger then
+            if now - lastHeartbeatTime >= HEARTBEAT_INTERVAL then
+                echo("Status: Idle or not in valid combat. Offhand: %s", currentOffhand)
+                lastHeartbeatTime = now
+            end
         end
     end
 
