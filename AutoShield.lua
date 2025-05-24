@@ -1,16 +1,14 @@
 local mq = require 'mq'
 
-local SCRIPT_VERSION = "2.0"
-local SCRIPT_DATE = "2025-05-22"
+local SCRIPT_VERSION = "2.1"
+local SCRIPT_DATE = "2025-05-24"
 
 --[[
 Changelog:
-v2.0 (2025-05-22)
-  - Aggro only counts if in combat, so shield won't stick out of combat.
-  - Mana checks are skipped for warriors.
-  - Every time the shield is equipped (or the reason changes), the script echoes the reason(s).
-  - Shield only "sticks" for HP/stun recovery, not for temporary triggers.
-  - Out of combat at full HP, with no danger: always equips DPS offhand.
+v2.1 (2025-05-24)
+  - Aggro count only includes "Auto Hater" mobs that are Aggressive and not Dead.
+  - Prevents nil value errors and false positives from passive xtargets.
+  - Advanced debug mode included.
 ]]
 
 ----------------------------- CONFIG SECTION -----------------------------
@@ -24,7 +22,7 @@ local SHIELD_DURATION = 5  -- Seconds to leave shield equipped for focus benefit
 local LOW_HP_THRESHOLD = 15    -- Equip shield below this HP%
 local SAFE_HP_THRESHOLD = 25   -- Only unequip shield when above this HP%
 
-local AGGRO_MOB_COUNT = 3      -- Equip shield if aggro > this number
+local AGGRO_MOB_COUNT = 3      -- Equip shield if aggro >= this number
 
 local LOW_MANA_THRESHOLD = 10      -- Shield if mana < this %
 local LOW_ENDURANCE_THRESHOLD = 10 -- Shield if endurance < this %
@@ -39,16 +37,18 @@ local DEFENSIVE_DISC_NAMES = {
 local BUFF_TRIGGER = "Mortal Coil"        -- Sample: shield if this buff is up
 local DEBUFF_TRIGGER = "Doom"             -- Sample: shield if this debuff is up
 
--- NEW: Toggle for status/heartbeat messages (off by default)
 local ENABLE_STATUS_HEARTBEAT = false -- Set to true to enable periodic status messages
+
+-- ADVANCED DEBUG CONFIG
+local ADVANCED_DEBUG = true
+local DEBUG_INTERVAL = 30 -- seconds between debug status messages
 
 ----------------------------- STATE SECTION -----------------------------
 local lastSwapTime = 0
 local shieldEquippedForFocus = false
 local combatActive = false
 local inDanger = false -- Track persistent danger state
-
--- NEW: Heartbeat status timer
+local lastDebugTime = 0
 local lastHeartbeatTime = 0
 local HEARTBEAT_INTERVAL = 15 -- seconds between status messages
 
@@ -59,6 +59,12 @@ end
 
 local function critical_echo(msg, ...)
     mq.cmdf('/echo \ar[AutoShield v%s] ' .. msg .. '\ax', SCRIPT_VERSION, ...)
+end
+
+local function debug_echo(msg, ...)
+    if ADVANCED_DEBUG then
+        mq.cmdf('/echo [AutoShield-DEBUG] ' .. msg, ...)
+    end
 end
 
 ----------------------------- LOGIC -----------------------------
@@ -91,12 +97,21 @@ local function getCurrentOffhand()
 end
 
 ----------------------------- DANGER TRIGGERS -----------------------------
+-- Only count "Auto Hater" mobs that are Aggressive and not Dead (robust, no nil errors)
 local function aggroCount()
     local count = 0
     if not mq.TLO.Me.Combat() then return 0 end
     for i=1, (mq.TLO.Me.XTargetSlots() or 0) do
         local xtarget = mq.TLO.Me.XTarget(i)
-        if xtarget() and xtarget.TargetType() == "Auto Hater" then count = count + 1 end
+        if xtarget() and xtarget.TargetType() == "Auto Hater" then
+            local id = xtarget.ID()
+            if id then
+                local spawn = mq.TLO.Spawn("id "..id)
+                if spawn() and spawn.Aggressive() and not spawn.Dead() then
+                    count = count + 1
+                end
+            end
+        end
     end
     return count
 end
@@ -141,7 +156,7 @@ local function hasDebuff(name)
     return name ~= "" and mq.TLO.Me.Buff(name)()
 end
 
--- Improved danger logic: only stick for HP/stun, all other danger clears instantly
+----------------------------- DANGER LOGIC -----------------------------
 local function getDangerStatus()
     local hp = mq.TLO.Me.PctHPs() or 100
     local stunned = mq.TLO.Me.Stunned()
@@ -159,7 +174,7 @@ local function getDangerStatus()
         stunDanger = true
         table.insert(reasons, "Stunned")
     end
-    if aggro >= AGGRO_MOB_COUNT then table.insert(reasons, "Aggro Count High") end
+    if aggro >= AGGRO_MOB_COUNT then table.insert(reasons, string.format("Aggro Count High (%d)", aggro)) end
     if isKnightOrWarrior() and hasActiveDisc() then table.insert(reasons, "Defensive Disc Active") end
     if manaLow() then table.insert(reasons, "Low Mana") end
     if enduranceLow() then table.insert(reasons, "Low Endurance") end
@@ -196,15 +211,27 @@ if not mq.TLO.FindItem(OFFHAND_ITEM)() then
 end
 
 local lastShieldReason = ""
+local lastDangerState = false
 
 while true do
     mq.delay(250)
+
     if isBusy() then goto continue end
 
     local now = os.time()
     local currentOffhand = getCurrentOffhand()
     local validCombat = isValidCombatTarget()
     local danger, dangerReason, dangerType = getDangerStatus()
+    local aggro = aggroCount()
+    local hp = mq.TLO.Me.PctHPs() or 100
+    local xtargetSlots = mq.TLO.Me.XTargetSlots() or 0
+
+    -- Debug: Danger state change
+    if ADVANCED_DEBUG and danger ~= lastDangerState then
+        debug_echo("DANGER STATE: %s -> %s | Reason: %s | HP: %.1f | Aggro: %d | XTargets: %d | Offhand: %s",
+            tostring(lastDangerState), tostring(danger), tostring(dangerReason), hp, aggro, xtargetSlots, currentOffhand)
+        lastDangerState = danger
+    end
 
     -- Handle danger state transitions and shield equip
     if danger then
@@ -213,9 +240,10 @@ while true do
                 shieldEquippedForFocus = false
                 echo("DANGER: %s. Equipping shield for safety.", dangerReason)
                 lastShieldReason = dangerReason
+                debug_echo("SWAP: %s -> %s | Reason: %s | HP: %.1f | Aggro: %d | XTargets: %d",
+                    currentOffhand, SHIELD_ITEM, dangerReason, hp, aggro, xtargetSlots)
             end
         elseif lastShieldReason ~= dangerReason then
-            -- Always echo if the reason changes, even if shield is already on
             echo("DANGER: %s. Shield remains equipped.", dangerReason)
             lastShieldReason = dangerReason
         end
@@ -230,11 +258,15 @@ while true do
                 shieldEquippedForFocus = false
                 lastSwapTime = now
                 echo("Recovered from danger. Swapping back to DPS offhand for combat.")
+                debug_echo("SWAP: %s -> %s | Reason: Safe | HP: %.1f | Aggro: %d | XTargets: %d",
+                    currentOffhand, OFFHAND_ITEM, hp, aggro, xtargetSlots)
             end
         elseif not validCombat and currentOffhand ~= OFFHAND_ITEM then
             if equipItem(PROC_SLOT, OFFHAND_ITEM) then
                 shieldEquippedForFocus = false
                 echo("Recovered from danger. Out of combat, equipping DPS offhand.")
+                debug_echo("SWAP: %s -> %s | Reason: Out of combat | HP: %.1f | Aggro: %d | XTargets: %d",
+                    currentOffhand, OFFHAND_ITEM, hp, aggro, xtargetSlots)
             end
         end
     end
@@ -251,6 +283,8 @@ while true do
             if currentOffhand ~= OFFHAND_ITEM then
                 if equipItem(PROC_SLOT, OFFHAND_ITEM) then
                     echo("Engaged valid combat. Equipping DPS offhand to start swap cycle.")
+                    debug_echo("SWAP: %s -> %s | Reason: Combat start | HP: %.1f | Aggro: %d | XTargets: %d",
+                        currentOffhand, OFFHAND_ITEM, hp, aggro, xtargetSlots)
                 end
             end
         end
@@ -261,12 +295,16 @@ while true do
                 shieldEquippedForFocus = true
                 lastSwapTime = now
                 echo("Equipping shield to benefit from Furious Bash focus effect.")
+                debug_echo("SWAP: %s -> %s | Reason: Focus proc | HP: %.1f | Aggro: %d | XTargets: %d",
+                    currentOffhand, SHIELD_ITEM, hp, aggro, xtargetSlots)
             end
         elseif shieldEquippedForFocus and (now - lastSwapTime >= SHIELD_DURATION) then
             if equipItem(PROC_SLOT, OFFHAND_ITEM) then
                 shieldEquippedForFocus = false
                 lastSwapTime = now
                 echo("Swapping back to DPS offhand for continued combat.")
+                debug_echo("SWAP: %s -> %s | Reason: Focus proc end | HP: %.1f | Aggro: %d | XTargets: %d",
+                    SHIELD_ITEM, OFFHAND_ITEM, hp, aggro, xtargetSlots)
             end
         end
     else
@@ -277,6 +315,8 @@ while true do
             if not danger and currentOffhand ~= OFFHAND_ITEM then
                 if equipItem(PROC_SLOT, OFFHAND_ITEM) then
                     echo("Combat ended. Swapping back to DPS offhand.")
+                    debug_echo("SWAP: %s -> %s | Reason: Combat ended | HP: %.1f | Aggro: %d | XTargets: %d",
+                        currentOffhand, OFFHAND_ITEM, hp, aggro, xtargetSlots)
                 end
             end
         end
@@ -285,7 +325,7 @@ while true do
         end
     end
 
-    -- Status Heartbeat (Idle/Not in Combat) -- NEW FEATURE
+    -- Status Heartbeat (Idle/Not in Combat)
     if ENABLE_STATUS_HEARTBEAT then
         if not validCombat and not danger then
             if now - lastHeartbeatTime >= HEARTBEAT_INTERVAL then
@@ -293,6 +333,13 @@ while true do
                 lastHeartbeatTime = now
             end
         end
+    end
+
+    -- ADVANCED DEBUG: Periodic status (throttled)
+    if ADVANCED_DEBUG and now - lastDebugTime > DEBUG_INTERVAL then
+        debug_echo("STATUS: Combat=%s | Aggro=%d | Offhand=%s | Danger=%s | HP=%.1f | XTargets=%d",
+            tostring(validCombat), aggro, currentOffhand, tostring(inDanger), hp, xtargetSlots)
+        lastDebugTime = now
     end
 
     ::continue::
