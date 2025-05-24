@@ -32,21 +32,21 @@ The script responds dynamically to lost aggro, low health, and NPC spellcasting,
 - **Aggro Mode Selection:**
 AutoShield.lua now supports three configurable aggro-detection logics. Set your preferred mode at the top of the script:
 
-AGGRO_MODE = "primary"
+  AGGRO_MODE = "primary"
 
-  Shield is equipped only when YOU are the primary target of at least N mobs (classic tank logic).
+    Shield is equipped only when YOU are the primary target of at least N mobs (classic tank logic).
 
-AGGRO_MODE = "all"
+  AGGRO_MODE = "all"
 
-  Shield is equipped when your group is fighting at least N "Auto Hater" mobs, regardless of who has aggro.
-  This is the most conservative, group-friendly option.
+    Shield is equipped when your group is fighting at least N "Auto Hater" mobs, regardless of who has aggro.
+    This is the most conservative, group-friendly option.
 
-AGGRO_MODE = "anyaggro"
+  AGGRO_MODE = "anyaggro"
 
-  Shield is equipped if YOU have aggro on at least one mob, regardless of the total number.
+    Shield is equipped if YOU have aggro on at least one mob, regardless of the total number.
 
-To use:
-Edit the line: local AGGRO_MODE = "primary" -- or "all", or "anyaggro"
+  To use:
+  Edit the line: local AGGRO_MODE = "primary" -- or "all", or "anyaggro"
 
  - **Heartbeat/Status Echo (Optional):**
   Optionally prints periodic status messages in your EQ chat window, confirming that the script is active and monitoring. Disabled by default; can be enabled by setting ENABLE_STATUS_HEARTBEAT = true in the configuration.
