@@ -54,11 +54,11 @@ local HEARTBEAT_INTERVAL = 15 -- seconds between status messages
 
 ----------------------------- UTILS -----------------------------
 local function echo(msg, ...)
-    mq.cmdf('/echo [AutoBash v%s] ' .. msg, SCRIPT_VERSION, ...)
+    mq.cmdf('/echo [AutoShield v%s] ' .. msg, SCRIPT_VERSION, ...)
 end
 
 local function critical_echo(msg, ...)
-    mq.cmdf('/echo \ar[AutoBash v%s] ' .. msg .. '\ax', SCRIPT_VERSION, ...)
+    mq.cmdf('/echo \ar[AutoShield v%s] ' .. msg .. '\ax', SCRIPT_VERSION, ...)
 end
 
 ----------------------------- LOGIC -----------------------------
